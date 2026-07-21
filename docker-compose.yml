@@ -1,0 +1,18 @@
+services:
+  transcoder:
+    build: .
+    ports:
+      - "7000:7000"
+    environment:
+      PORT: "7000"
+      HOST_ROOT: "/host"
+      ENCODING_BACKEND: "cpu"
+    volumes:
+      - "/Users:/host/Users:rw"
+      - "/Volumes:/host/Volumes:rw"
+      - "/tmp:/host/tmp:rw"
+      - "uploads:/tmp/transcoder-uploads"
+    restart: unless-stopped
+
+volumes:
+  uploads:

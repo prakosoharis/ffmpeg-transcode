@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>HLS Transcoder</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <section class="workspace">
+        <header class="topbar">
+          <div>
+            <p class="eyebrow">HLS Packaging Pipeline</p>
+            <h1>VOD HLS Transcoder</h1>
+          </div>
+          <div class="status-pill" id="deviceLabel">/dev/dri/renderD128</div>
+        </header>
+
+        <form id="transcodeForm" class="panel">
+          <label id="dropZone" class="drop-zone" for="videoInput">
+            <input id="videoInput" name="video" type="file" accept=".mov,.mpeg,.mp4,video/quicktime,video/mp4,mpeg" />
+            <span class="drop-icon">+</span>
+            <strong id="fileName">Drop a .mov, .mpeg, or .mp4 file here</strong>
+            <small>Click to browse or drag a raw source video into the upload zone.</small>
+          </label>
+
+          <div class="subtitle-row">
+            <label class="subtitle-upload" for="subtitleInput">
+              <input id="subtitleInput" name="subtitle" type="file" accept=".vtt,text/vtt" multiple />
+              <span>Subtitle .vtt</span>
+              <strong id="subtitleName">No subtitles selected</strong>
+            </label>
+            <div id="subtitleTracks" class="subtitle-tracks"></div>
+          </div>
+
+          <div class="field-grid">
+            <label class="field">
+              <span>Output Folder Name</span>
+              <input id="outputFolder" name="outputFolder" required placeholder="movie-hls-package" />
+            </label>
+            <label class="field">
+              <span>Absolute Host Storage Path</span>
+              <div class="path-picker">
+                <input id="hostPath" name="hostPath" required placeholder="/Users/you/Videos/exports" />
+                <button id="browsePath" type="button">Browse</button>
+              </div>
+            </label>
+          </div>
+
+          <section class="encoding">
+            <div class="section-title">
+              <h2>Advanced Encoding Parameters</h2>
+              <span>GOP 60 · 2s HLS TS segments · VAAPI scaling</span>
+            </div>
+            <div id="ladderList" class="ladder"></div>
+          </section>
+
+          <button id="executeBtn" class="execute" type="submit">Execute Transcoding</button>
+        </form>
+
+        <section class="progress-panel" aria-live="polite">
+          <div class="progress-header">
+            <span id="progressState">Idle</span>
+            <strong id="progressPercent">0%</strong>
+          </div>
+          <div class="progress-track">
+            <div id="progressBar" class="progress-bar"></div>
+          </div>
+          <div class="metrics">
+            <span id="frameMetric">frame -</span>
+            <span id="fpsMetric">fps -</span>
+            <span id="speedMetric">speed -</span>
+          </div>
+          <pre id="logOutput"></pre>
+        </section>
+
+        <form id="attachForm" class="panel attach-panel">
+          <div class="section-title">
+            <h2>Attach Subtitles to Existing HLS</h2>
+            <span>No video transcoding required</span>
+          </div>
+          <label class="field">
+            <span>Existing HLS Package Path</span>
+            <div class="path-picker">
+              <input id="packagePath" name="packagePath" required placeholder="/Users/you/Videos/exports/movie-hls-package" />
+              <button id="browsePackagePath" type="button">Browse</button>
+            </div>
+          </label>
+          <div class="subtitle-row">
+            <label class="subtitle-upload" for="attachSubtitleInput">
+              <input id="attachSubtitleInput" name="subtitle" type="file" accept=".vtt,text/vtt" multiple />
+              <span>Subtitle .vtt</span>
+              <strong id="attachSubtitleName">No subtitles selected</strong>
+            </label>
+            <div id="attachSubtitleTracks" class="subtitle-tracks"></div>
+          </div>
+          <button id="attachBtn" class="execute secondary-execute" type="submit">Attach Subtitles</button>
+        </form>
+      </section>
+    </main>
+
+    <dialog id="successDialog">
+      <div class="modal">
+        <h2>Transcoding Successful!</h2>
+        <p id="successText"></p>
+        <button id="closeDialog" type="button">Close</button>
+      </div>
+    </dialog>
+
+    <dialog id="directoryDialog">
+      <div class="modal directory-modal">
+        <div class="modal-header">
+          <div>
+            <h2>Select Output Folder</h2>
+            <p id="currentDirectory">/</p>
+          </div>
+          <button id="closeDirectory" class="secondary-button" type="button">Close</button>
+        </div>
+        <div class="directory-actions">
+          <button id="upDirectory" class="secondary-button" type="button">Up</button>
+          <button id="selectDirectory" type="button">Use This Folder</button>
+        </div>
+        <div id="directoryList" class="directory-list"></div>
+      </div>
+    </dialog>
+
+    <script src="/app.js"></script>
+  </body>
+</html>

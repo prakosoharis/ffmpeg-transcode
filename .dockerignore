@@ -1,0 +1,9 @@
+node_modules
+npm-debug.log
+.git
+.DS_Store
+*.mp4
+*.mov
+*.mpeg
+*.ts
+*.m3u8

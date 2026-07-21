@@ -1,0 +1,18 @@
+{
+  "name": "vaapi-hls-transcoder",
+  "version": "1.0.0",
+  "description": "Dockerized HLS transcoding web application.",
+  "main": "server/index.js",
+  "scripts": {
+    "start": "node server/index.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^4.19.2",
+    "multer": "^2.0.2",
+    "sanitize-filename": "^1.6.3"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
