@@ -242,6 +242,10 @@ h1 {
   gap: 8px;
 }
 
+.source-path-field {
+  margin-top: 16px;
+}
+
 .path-picker button {
   min-height: 44px;
   border: 1px solid var(--line);
@@ -523,6 +527,24 @@ dialog::backdrop {
   border-radius: 3px;
   background: var(--accent-2);
   position: relative;
+}
+
+.file-mark {
+  width: 16px;
+  height: 20px;
+  border: 1px solid var(--accent);
+  border-radius: 3px;
+  background: #111315;
+  position: relative;
+}
+
+.file-mark::after {
+  content: "";
+  position: absolute;
+  right: -1px;
+  top: -1px;
+  border-top: 7px solid var(--accent);
+  border-left: 7px solid transparent;
 }
 
 .folder-mark::before {

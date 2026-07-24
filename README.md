@@ -6,6 +6,8 @@ Optional `.vtt` subtitle files can be uploaded with the source video. The app co
 
 Existing HLS packages can also receive subtitles without transcoding again. Use the "Attach Subtitles to Existing HLS" form, point it at the folder that already contains `master.m3u8`, then upload one or more `.vtt` files.
 
+For very large source videos, use the "Source Video Path" field instead of uploading the file through the browser. This lets FFmpeg read the file directly from disk and avoids browser upload failures for files such as 120GB masters.
+
 ## Run on macOS or Docker Desktop
 
 ```bash

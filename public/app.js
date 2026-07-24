@@ -22,8 +22,10 @@ const successDialog = document.querySelector('#successDialog');
 const successText = document.querySelector('#successText');
 const closeDialog = document.querySelector('#closeDialog');
 const deviceLabel = document.querySelector('#deviceLabel');
+const sourcePathInput = document.querySelector('#sourcePath');
 const hostPathInput = document.querySelector('#hostPath');
 const packagePathInput = document.querySelector('#packagePath');
+const browseSourcePath = document.querySelector('#browseSourcePath');
 const browsePath = document.querySelector('#browsePath');
 const browsePackagePath = document.querySelector('#browsePackagePath');
 const directoryDialog = document.querySelector('#directoryDialog');
@@ -40,6 +42,7 @@ let events = null;
 let browsingPath = '/';
 let browsingParent = null;
 let activePathInput = null;
+let browserMode = 'directory';
 
 loadLadder();
 
@@ -97,8 +100,12 @@ form.addEventListener('submit', async (event) => {
     ])
   );
 
-  if (!fileInput.files[0]) {
-    setError('Choose a source video first.');
+  if (!fileInput.files[0] && !sourcePathInput.value.trim()) {
+    setError('Choose a source video upload or source video path.');
+    return;
+  }
+  if (fileInput.files[0] && sourcePathInput.value.trim()) {
+    setError('Use either upload or source video path, not both.');
     return;
   }
   if (!selected.length) {
@@ -132,13 +139,21 @@ form.addEventListener('submit', async (event) => {
 });
 
 closeDialog.addEventListener('click', () => successDialog.close());
+browseSourcePath.addEventListener('click', () => {
+  activePathInput = sourcePathInput;
+  browserMode = 'file';
+  const startPath = pathDirectory(sourcePathInput.value.trim() || hostPathInput.value.trim() || '/');
+  openDirectoryBrowser(startPath);
+});
 browsePath.addEventListener('click', () => {
   activePathInput = hostPathInput;
+  browserMode = 'directory';
   const startPath = hostPathInput.value.trim() || '/';
   openDirectoryBrowser(startPath);
 });
 browsePackagePath.addEventListener('click', () => {
   activePathInput = packagePathInput;
+  browserMode = 'directory';
   const startPath = packagePathInput.value.trim() || hostPathInput.value.trim() || '/';
   openDirectoryBrowser(startPath);
 });
@@ -273,7 +288,8 @@ async function loadDirectory(path) {
   directoryList.innerHTML = '<div class="directory-empty">Loading...</div>';
 
   try {
-    const response = await fetch(`/api/directories?path=${encodeURIComponent(path)}`);
+    const includeFiles = browserMode === 'file' ? '&includeFiles=1' : '';
+    const response = await fetch(`/api/directories?path=${encodeURIComponent(path)}${includeFiles}`);
     const payload = await response.json();
     if (!response.ok) throw new Error(payload.error || 'Unable to read directory.');
 
@@ -281,12 +297,22 @@ async function loadDirectory(path) {
     browsingParent = payload.parent;
     currentDirectory.textContent = payload.path;
     upDirectory.disabled = !payload.parent;
-    directoryList.innerHTML = payload.directories.length
-      ? payload.directories.map(renderDirectory).join('')
+    const rows = [
+      ...payload.directories.map(renderDirectory),
+      ...(payload.files || []).map(renderFile)
+    ];
+    directoryList.innerHTML = rows.length
+      ? rows.join('')
       : '<div class="directory-empty">No folders found.</div>';
 
     document.querySelectorAll('[data-directory]').forEach((button) => {
       button.addEventListener('click', () => loadDirectory(button.dataset.directory));
+    });
+    document.querySelectorAll('[data-file]').forEach((button) => {
+      button.addEventListener('click', () => {
+        (activePathInput || sourcePathInput).value = button.dataset.file;
+        directoryDialog.close();
+      });
     });
   } catch (error) {
     directoryList.innerHTML = `<div class="directory-empty">${escapeHtml(error.message)}</div>`;
@@ -300,6 +326,23 @@ function renderDirectory(directory) {
       <span>${escapeHtml(directory.name)}</span>
     </button>
   `;
+}
+
+function renderFile(file) {
+  return `
+    <button class="directory-row file-row" type="button" data-file="${escapeHtml(file.path)}">
+      <span class="file-mark"></span>
+      <span>${escapeHtml(file.name)}</span>
+    </button>
+  `;
+}
+
+function pathDirectory(value) {
+  if (!value || value === '/') return '/';
+  const normalized = value.replace(/\\/g, '/');
+  if (!/\.(mov|mpeg|mp4)$/i.test(normalized)) return normalized;
+  const index = normalized.lastIndexOf('/');
+  return index <= 0 ? '/' : normalized.slice(0, index);
 }
 
 function subscribe(jobId) {

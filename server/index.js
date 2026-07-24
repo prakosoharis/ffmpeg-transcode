@@ -176,6 +176,7 @@ app.get('/api/ladder', (_req, res) => {
 app.get('/api/directories', async (req, res) => {
   try {
     const requested = String(req.query.path || '/');
+    const includeFiles = req.query.includeFiles === '1';
     const hostPath = normalizeHostBrowsePath(requested);
     const containerPath = hostPathToContainer(hostPath);
     const resolvedRoot = path.resolve(HOST_ROOT);
@@ -193,11 +194,21 @@ app.get('/api/directories', async (req, res) => {
         path: path.posix.join(hostPath, entry.name)
       }))
       .sort((a, b) => a.name.localeCompare(b.name));
+    const files = includeFiles
+      ? entries
+          .filter((entry) => entry.isFile() && isVideoFile(entry.name))
+          .map((entry) => ({
+            name: entry.name,
+            path: path.posix.join(hostPath, entry.name)
+          }))
+          .sort((a, b) => a.name.localeCompare(b.name))
+      : [];
 
     res.json({
       path: hostPath,
       parent: hostPath === '/' ? null : path.posix.dirname(hostPath),
-      directories
+      directories,
+      files
     });
   } catch (error) {
     if (error.code === 'ENOENT') {
@@ -219,10 +230,11 @@ app.post(
   try {
     const videoFile = req.files?.video?.[0];
     const subtitleFiles = req.files?.subtitle || [];
+    const sourcePath = String(req.body.sourcePath || '').trim();
 
-    if (!videoFile) {
+    if (!videoFile && !sourcePath) {
       cleanupUploads(...subtitleFiles);
-      return res.status(400).json({ error: 'A video file is required.' });
+      return res.status(400).json({ error: 'A video upload or source video path is required.' });
     }
 
     const outputFolder = sanitize(String(req.body.outputFolder || '').trim());
@@ -242,6 +254,18 @@ app.post(
       return res.status(400).json({ error: 'Absolute Host Storage Path must be an absolute path.' });
     }
 
+    const source = videoFile ? videoFile.path : hostPathToContainer(sourcePath);
+    if (!isVideoFile(source)) {
+      cleanupUploads(videoFile, ...subtitleFiles);
+      return res.status(400).json({ error: 'Source video must use .mov, .mpeg, or .mp4 format.' });
+    }
+    try {
+      fs.accessSync(source, fs.constants.R_OK);
+    } catch {
+      cleanupUploads(videoFile, ...subtitleFiles);
+      return res.status(400).json({ error: 'Source video path is not readable.' });
+    }
+
     const variants = selectedIds.map((id) => buildVariantConfig(id, variantSettings[id])).filter(Boolean);
     if (!variants.length) {
       cleanupUploads(videoFile, ...subtitleFiles);
@@ -249,8 +273,9 @@ app.post(
     }
 
     const job = createJob({
-      source: videoFile.path,
-      originalName: videoFile.originalname,
+      source,
+      uploadedSource: Boolean(videoFile),
+      originalName: videoFile?.originalname || path.basename(sourcePath),
       hostPath,
       outputFolder,
       variants,
@@ -354,7 +379,7 @@ app.listen(PORT, '0.0.0.0', () => {
   console.log(`HLS transcoder listening on http://0.0.0.0:${PORT} using ${ENCODING_BACKEND_DETAILS.label}`);
 });
 
-function createJob({ source, originalName, hostPath, outputFolder, variants, subtitles }) {
+function createJob({ source, uploadedSource, originalName, hostPath, outputFolder, variants, subtitles }) {
   const id = crypto.randomUUID();
   const containerHostPath = hostPathToContainer(hostPath);
   const outputDir = path.join(containerHostPath, outputFolder);
@@ -362,6 +387,7 @@ function createJob({ source, originalName, hostPath, outputFolder, variants, sub
   return {
     id,
     source,
+    uploadedSource,
     originalName,
     hostPath,
     outputFolder,
@@ -747,6 +773,10 @@ function normalizeRate(value, fallback) {
   return /^\d+(?:\.\d+)?[kKmM]$/.test(rate) ? rate : fallback;
 }
 
+function isVideoFile(filePath) {
+  return ['.mov', '.mpeg', '.mp4'].includes(path.extname(String(filePath)).toLowerCase());
+}
+
 function normalizeLanguage(value) {
   const language = String(value || 'id').trim().toLowerCase();
   return /^[a-z]{2,3}(-[a-z0-9]{2,8})?$/.test(language) ? language : 'id';
@@ -875,7 +905,7 @@ function cleanupUploads(...files) {
 }
 
 function cleanupJobFiles(job) {
-  cleanup(job.source);
+  if (job.uploadedSource) cleanup(job.source);
   for (const subtitle of job.subtitles || []) {
     cleanup(subtitle.source);
   }
