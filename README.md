@@ -79,6 +79,12 @@ For Hackintosh or Intel/Homebrew installs, use explicit FFmpeg paths:
 FFMPEG_PATH=/usr/local/bin/ffmpeg FFPROBE_PATH=/usr/local/bin/ffprobe ENCODING_BACKEND=videotoolbox npm start
 ```
 
+For large source videos, raise the upload limit as needed:
+
+```bash
+MAX_UPLOAD_SIZE=200GB FFMPEG_PATH=/usr/local/bin/ffmpeg FFPROBE_PATH=/usr/local/bin/ffprobe ENCODING_BACKEND=videotoolbox npm start
+```
+
 Open `http://localhost:7000`. In native macOS mode, host output paths are used directly, such as `/Users/alex/Videos/exports`.
 
 If the UI badge shows `CPU FFmpeg` instead of `VideoToolbox`, check that `ffmpeg -encoders | grep videotoolbox` returns both encoders and that `system_profiler SPDisplaysDataType` lists the Radeon display GPU.

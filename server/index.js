@@ -16,7 +16,7 @@ const FFPROBE_BIN = resolveBinary('ffprobe', process.env.FFPROBE_PATH);
 const REQUESTED_ENCODING_BACKEND = process.env.ENCODING_BACKEND || 'auto';
 const ENCODING_BACKEND = resolveEncodingBackend(REQUESTED_ENCODING_BACKEND);
 const ENCODING_BACKEND_DETAILS = describeEncodingBackend();
-const MAX_UPLOAD_BYTES = Number(process.env.MAX_UPLOAD_BYTES || 25 * 1024 * 1024 * 1024);
+const MAX_UPLOAD_BYTES = parseBytes(process.env.MAX_UPLOAD_SIZE || process.env.MAX_UPLOAD_BYTES || '100GB');
 
 const LADDER = {
   '4k': {
@@ -342,6 +342,11 @@ app.get('/api/jobs/:id/events', (req, res) => {
 });
 
 app.use((error, _req, res, _next) => {
+  if (error instanceof multer.MulterError && error.code === 'LIMIT_FILE_SIZE') {
+    return res.status(413).json({
+      error: `Upload file is too large. Maximum allowed size is ${formatBytes(MAX_UPLOAD_BYTES)}.`
+    });
+  }
   res.status(400).json({ error: error.message || 'Request failed.' });
 });
 
@@ -816,6 +821,37 @@ function processSpawnError(error, binary) {
     return new Error(`${binary} was not found. Install FFmpeg or set ${path.basename(binary).toUpperCase()}_PATH to the full binary path.`);
   }
   return error;
+}
+
+function parseBytes(value) {
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  const raw = String(value || '').trim();
+  const match = raw.match(/^(\d+(?:\.\d+)?)\s*(b|kb|mb|gb|tb)?$/i);
+  if (!match) return 100 * 1024 * 1024 * 1024;
+
+  const amount = Number(match[1]);
+  const unit = (match[2] || 'b').toLowerCase();
+  const multipliers = {
+    b: 1,
+    kb: 1024,
+    mb: 1024 ** 2,
+    gb: 1024 ** 3,
+    tb: 1024 ** 4
+  };
+  return Math.floor(amount * multipliers[unit]);
+}
+
+function formatBytes(bytes) {
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let value = Number(bytes);
+  let unit = 0;
+
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit += 1;
+  }
+
+  return `${Number(value.toFixed(value >= 10 || unit === 0 ? 0 : 1))}${units[unit]}`;
 }
 
 function appendLog(job, chunk) {
