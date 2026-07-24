@@ -77,6 +77,18 @@ Open `http://localhost:7000`. In native macOS mode, host output paths are used d
 
 If the UI badge shows `CPU FFmpeg` instead of `VideoToolbox`, check that `ffmpeg -encoders | grep videotoolbox` returns both encoders and that `system_profiler SPDisplaysDataType` lists the Radeon display GPU.
 
+If transcoding fails with `spawn ffprobe ENOENT`, FFmpeg is not visible to the Node process. Install it with Homebrew or start the app with explicit paths:
+
+```bash
+FFMPEG_PATH=/opt/homebrew/bin/ffmpeg FFPROBE_PATH=/opt/homebrew/bin/ffprobe ENCODING_BACKEND=videotoolbox npm start
+```
+
+For Intel/Homebrew installs, the paths may be:
+
+```bash
+FFMPEG_PATH=/usr/local/bin/ffmpeg FFPROBE_PATH=/usr/local/bin/ffprobe ENCODING_BACKEND=videotoolbox npm start
+```
+
 ## Host Output Paths
 
 The compose file mounts common macOS host locations under `/host`:

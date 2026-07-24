@@ -11,6 +11,8 @@ const sanitize = require('sanitize-filename');
 const PORT = Number(process.env.PORT || 7000);
 const HOST_ROOT = process.env.HOST_ROOT || (process.platform === 'darwin' ? '/' : '/host');
 const UPLOAD_DIR = process.env.UPLOAD_DIR || '/tmp/transcoder-uploads';
+const FFMPEG_BIN = resolveBinary('ffmpeg', process.env.FFMPEG_PATH);
+const FFPROBE_BIN = resolveBinary('ffprobe', process.env.FFPROBE_PATH);
 const REQUESTED_ENCODING_BACKEND = process.env.ENCODING_BACKEND || 'auto';
 const ENCODING_BACKEND = resolveEncodingBackend(REQUESTED_ENCODING_BACKEND);
 const ENCODING_BACKEND_DETAILS = describeEncodingBackend();
@@ -108,7 +110,7 @@ function hasVideoToolboxEncoders() {
 }
 
 function listFfmpegEncoders() {
-  const result = spawnSync('ffmpeg', ['-hide_banner', '-encoders'], {
+  const result = spawnSync(FFMPEG_BIN, ['-hide_banner', '-encoders'], {
     encoding: 'utf8',
     maxBuffer: 1024 * 1024 * 4
   });
@@ -179,7 +181,7 @@ app.get('/api/directories', async (req, res) => {
     const resolvedRoot = path.resolve(HOST_ROOT);
     const resolvedPath = path.resolve(containerPath);
 
-    if (resolvedPath !== resolvedRoot && !resolvedPath.startsWith(`${resolvedRoot}${path.sep}`)) {
+    if (!isPathInsideRoot(resolvedPath, resolvedRoot)) {
       return res.status(400).json({ error: 'Invalid directory path.' });
     }
 
@@ -389,7 +391,7 @@ async function runJob(job) {
   updateJob(job, { status: 'running', message: `Transcoding with ${ENCODING_BACKEND.toUpperCase()} backend.` });
 
   await new Promise((resolve, reject) => {
-    const child = spawn('ffmpeg', args, { stdio: ['ignore', 'ignore', 'pipe'] });
+    const child = spawn(FFMPEG_BIN, args, { stdio: ['ignore', 'ignore', 'pipe'] });
 
     child.stderr.setEncoding('utf8');
     child.stderr.on('data', (chunk) => {
@@ -397,7 +399,7 @@ async function runJob(job) {
       parseProgress(job, chunk);
     });
 
-    child.on('error', reject);
+    child.on('error', (error) => reject(processSpawnError(error, FFMPEG_BIN)));
     child.on('close', (code) => {
       if (code === 0) {
         finalizeJob(job)
@@ -572,7 +574,7 @@ function buildVideoToolboxFfmpegArgs(job) {
 
 function probeDuration(source) {
   return new Promise((resolve, reject) => {
-    const child = spawn('ffprobe', [
+    const child = spawn(FFPROBE_BIN, [
       '-v',
       'error',
       '-show_entries',
@@ -590,7 +592,7 @@ function probeDuration(source) {
     child.stderr.on('data', (chunk) => {
       errorOutput += chunk.toString();
     });
-    child.on('error', reject);
+    child.on('error', (error) => reject(processSpawnError(error, FFPROBE_BIN)));
     child.on('close', (code) => {
       const duration = Number.parseFloat(output);
       if (code !== 0 || !Number.isFinite(duration) || duration <= 0) {
@@ -775,12 +777,45 @@ function escapePlaylistAttribute(value) {
 
 function hostPathToContainer(hostPath) {
   const normalized = path.resolve(hostPath);
+  if (path.resolve(HOST_ROOT) === path.sep) return normalized;
   return path.join(HOST_ROOT, normalized.replace(/^\/+/, ''));
 }
 
 function normalizeHostBrowsePath(value) {
   const normalized = path.posix.normalize(`/${String(value).replace(/\\/g, '/')}`);
   return normalized === '//' ? '/' : normalized;
+}
+
+function isPathInsideRoot(targetPath, rootPath) {
+  const resolvedRoot = path.resolve(rootPath);
+  const resolvedTarget = path.resolve(targetPath);
+  if (resolvedRoot === path.sep) return resolvedTarget.startsWith(path.sep);
+  return resolvedTarget === resolvedRoot || resolvedTarget.startsWith(`${resolvedRoot}${path.sep}`);
+}
+
+function resolveBinary(name, explicitPath) {
+  if (explicitPath && fs.existsSync(explicitPath)) return explicitPath;
+
+  const candidates = [
+    `/opt/homebrew/bin/${name}`,
+    `/usr/local/bin/${name}`,
+    `/usr/bin/${name}`,
+    `/bin/${name}`,
+    name
+  ];
+
+  for (const candidate of candidates) {
+    if (candidate === name || fs.existsSync(candidate)) return candidate;
+  }
+
+  return name;
+}
+
+function processSpawnError(error, binary) {
+  if (error.code === 'ENOENT') {
+    return new Error(`${binary} was not found. Install FFmpeg or set ${path.basename(binary).toUpperCase()}_PATH to the full binary path.`);
+  }
+  return error;
 }
 
 function appendLog(job, chunk) {
