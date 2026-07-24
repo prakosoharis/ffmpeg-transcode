@@ -1,7 +1,0 @@
-services:
-  transcoder:
-    environment:
-      ENCODING_BACKEND: "vaapi"
-      VAAPI_DEVICE: "/dev/dri/renderD128"
-    devices:
-      - "/dev/dri:/dev/dri"

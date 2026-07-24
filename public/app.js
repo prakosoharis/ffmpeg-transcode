@@ -190,7 +190,7 @@ async function loadLadder() {
   const payload = await response.json();
   variants = payload.variants;
   backend = payload.backend || 'cpu';
-  deviceLabel.textContent = payload.backendDetails?.label || (backend === 'vaapi' ? payload.vaapiDevice : 'CPU FFmpeg');
+  deviceLabel.textContent = payload.backendDetails?.label || 'CPU FFmpeg';
   ladderList.innerHTML = variants.map(renderVariant).join('');
 }
 
@@ -222,7 +222,7 @@ function renderVariant(variant) {
 
 function backendLabel() {
   if (backend === 'videotoolbox') return 'via VideoToolbox';
-  return backend === 'vaapi' ? 'via VAAPI' : 'CPU';
+  return 'CPU';
 }
 
 function renderSubtitleSelection(input, label, container, languageName, trackName) {

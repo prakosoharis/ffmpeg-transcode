@@ -14,32 +14,68 @@ docker compose up --build
 
 Open `http://localhost:7000`.
 
-The default compose file uses CPU FFmpeg encoders (`libx264` and `libx265`) because Docker Desktop on macOS does not expose Linux render devices such as `/dev/dri/renderD128`.
+The default compose file uses CPU FFmpeg encoders (`libx264` and `libx265`).
 
-## Run Native on macOS with VideoToolbox
+## Setup VideoToolbox on macOS/Hackintosh
 
-For Hackintosh/macOS systems, hardware encoding is available through VideoToolbox when FFmpeg includes `h264_videotoolbox` and `hevc_videotoolbox`. Run the app outside Docker:
+VideoToolbox is the macOS hardware encoding path for H.264 and HEVC. It does not run inside Docker Desktop containers, so use this mode by running the app natively on macOS/Hackintosh.
+
+1. Install Homebrew if it is not installed:
+
+```bash
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+```
+
+2. Install Node.js and FFmpeg:
+
+```bash
+brew install node ffmpeg
+```
+
+3. Confirm FFmpeg includes VideoToolbox encoders:
+
+```bash
+ffmpeg -encoders | grep videotoolbox
+```
+
+Expected encoders include:
+
+```text
+h264_videotoolbox
+hevc_videotoolbox
+```
+
+4. Confirm macOS sees the display GPU:
+
+```bash
+system_profiler SPDisplaysDataType
+```
+
+On a Hackintosh with Radeon graphics, this should list the Radeon GPU under display hardware.
+
+5. Install app dependencies:
 
 ```bash
 npm install
+```
+
+6. Run with automatic backend detection:
+
+```bash
 npm start
 ```
 
-With the default `ENCODING_BACKEND=auto`, the backend selects VideoToolbox when macOS reports a Radeon display and FFmpeg exposes the VideoToolbox encoders. To force it:
+With the default `ENCODING_BACKEND=auto`, the backend selects VideoToolbox when macOS reports a Radeon display and FFmpeg exposes the VideoToolbox encoders.
+
+7. If you want to force VideoToolbox:
 
 ```bash
 ENCODING_BACKEND=videotoolbox npm start
 ```
 
-In native macOS mode, host output paths are used directly, such as `/Users/alex/Videos/exports`.
+Open `http://localhost:7000`. In native macOS mode, host output paths are used directly, such as `/Users/alex/Videos/exports`.
 
-## Run on Linux with VAAPI
-
-Use the VAAPI override file on a Linux host with VAAPI available:
-
-```bash
-docker compose -f docker-compose.yml -f docker-compose.vaapi.yml up --build
-```
+If the UI badge shows `CPU FFmpeg` instead of `VideoToolbox`, check that `ffmpeg -encoders | grep videotoolbox` returns both encoders and that `system_profiler SPDisplaysDataType` lists the Radeon display GPU.
 
 ## Host Output Paths
 
@@ -56,25 +92,8 @@ When the UI receives an absolute host path such as `/Users/alex/Videos/exports`,
 
 The path field includes a Browse button that lists host folders through the `/host` mount. On Docker Desktop, make sure the chosen host path is allowed in file sharing settings.
 
-## VAAPI
-
-The VAAPI override passes the host render device into the container:
-
-```yaml
-devices:
-  - "/dev/dri:/dev/dri"
-```
-
-The FFmpeg command initializes VAAPI with:
-
-```bash
--hwaccel vaapi -hwaccel_device /dev/dri/renderD128 -hwaccel_output_format vaapi
-```
-
-In VAAPI mode, the default ladder maps 4K and 2K to `hevc_vaapi`, and 1080p, 720p, and 360p to `h264_vaapi`. In CPU mode, the same ladder maps to `libx265` and `libx264`.
-
 ## Notes
 
-- VAAPI mode is intended for Linux hosts with render-device support.
+- Docker mode uses CPU encoding. Native macOS can use VideoToolbox when available.
 - The app streams progress via Server-Sent Events by parsing FFmpeg stderr `time=`, `frame=`, `fps=`, and `speed=` fields.
 - The output package contains per-rendition playlists and TS chunks plus `master.m3u8`.

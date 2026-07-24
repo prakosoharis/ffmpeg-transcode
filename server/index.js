@@ -11,7 +11,6 @@ const sanitize = require('sanitize-filename');
 const PORT = Number(process.env.PORT || 7000);
 const HOST_ROOT = process.env.HOST_ROOT || (process.platform === 'darwin' ? '/' : '/host');
 const UPLOAD_DIR = process.env.UPLOAD_DIR || '/tmp/transcoder-uploads';
-const VAAPI_DEVICE = process.env.VAAPI_DEVICE || '/dev/dri/renderD128';
 const REQUESTED_ENCODING_BACKEND = process.env.ENCODING_BACKEND || 'auto';
 const ENCODING_BACKEND = resolveEncodingBackend(REQUESTED_ENCODING_BACKEND);
 const ENCODING_BACKEND_DETAILS = describeEncodingBackend();
@@ -83,7 +82,6 @@ const LADDER = {
 function resolveEncodingBackend(requested) {
   const normalized = String(requested || 'auto').toLowerCase();
   if (normalized === 'cpu') return 'cpu';
-  if (normalized === 'vaapi') return hasVaapiDevice() ? 'vaapi' : 'cpu';
   if (normalized === 'videotoolbox') return hasVideoToolboxEncoders() ? 'videotoolbox' : 'cpu';
   if (process.platform === 'darwin' && hasRadeonDisplay() && hasVideoToolboxEncoders()) {
     return 'videotoolbox';
@@ -98,12 +96,6 @@ function describeEncodingBackend() {
       note: 'macOS hardware encoder selected'
     };
   }
-  if (ENCODING_BACKEND === 'vaapi') {
-    return {
-      label: 'VAAPI',
-      note: `${VAAPI_DEVICE} selected`
-    };
-  }
   return {
     label: 'CPU FFmpeg',
     note: REQUESTED_ENCODING_BACKEND === 'auto' ? 'hardware encoder not detected' : 'CPU encoder selected'
@@ -113,10 +105,6 @@ function describeEncodingBackend() {
 function hasVideoToolboxEncoders() {
   const encoders = listFfmpegEncoders();
   return encoders.includes('h264_videotoolbox') && encoders.includes('hevc_videotoolbox');
-}
-
-function hasVaapiDevice() {
-  return fs.existsSync(VAAPI_DEVICE) && listFfmpegEncoders().includes('h264_vaapi');
 }
 
 function listFfmpegEncoders() {
@@ -179,8 +167,7 @@ app.get('/api/ladder', (_req, res) => {
   res.json({
     variants: Object.values(LADDER).map(formatVariantForBackend),
     backend: ENCODING_BACKEND,
-    backendDetails: ENCODING_BACKEND_DETAILS,
-    vaapiDevice: VAAPI_DEVICE
+    backendDetails: ENCODING_BACKEND_DETAILS
   });
 });
 
@@ -488,67 +475,8 @@ async function attachSubtitlesToMasterPlaylist(job, tracks) {
 }
 
 function buildFfmpegArgs(job) {
-  if (ENCODING_BACKEND === 'vaapi') return buildVaapiFfmpegArgs(job);
   if (ENCODING_BACKEND === 'videotoolbox') return buildVideoToolboxFfmpegArgs(job);
   return buildCpuFfmpegArgs(job);
-}
-
-function buildVaapiFfmpegArgs(job) {
-  const splitLabels = job.variants.map((_, index) => `[v${index}in]`).join('');
-  const filters = [`[0:v]split=${job.variants.length}${splitLabels}`];
-
-  job.variants.forEach((variant, index) => {
-    filters.push(
-      `[v${index}in]scale_vaapi=w=${variant.width}:h=${variant.height}:format=nv12[v${index}]`
-    );
-  });
-
-  const args = [
-    '-hide_banner',
-    '-y',
-    '-hwaccel',
-    'vaapi',
-    '-hwaccel_device',
-    VAAPI_DEVICE,
-    '-hwaccel_output_format',
-    'vaapi',
-    '-i',
-    job.source,
-    '-filter_complex',
-    filters.join(';')
-  ];
-
-  job.variants.forEach((variant, index) => {
-    args.push('-map', `[v${index}]`);
-    args.push('-c:v:' + index, codecForBackend(variant.codec));
-    args.push('-b:v:' + index, variant.target);
-    args.push('-maxrate:v:' + index, variant.maxrate);
-    args.push('-bufsize:v:' + index, variant.bufsize);
-    args.push('-g:v:' + index, '60');
-    args.push('-keyint_min:v:' + index, '60');
-    args.push('-sc_threshold:v:' + index, '0');
-  });
-
-  args.push(
-    '-an',
-    '-f',
-    'hls',
-    '-hls_time',
-    '2',
-    '-hls_playlist_type',
-    'vod',
-    '-hls_flags',
-    'independent_segments',
-    '-master_pl_name',
-    'master.m3u8',
-    '-var_stream_map',
-    job.variants.map((_, index) => `v:${index},name:${job.variants[index].id}`).join(' '),
-    '-hls_segment_filename',
-    path.join(job.outputDir, '%v', 'segment_%05d.ts'),
-    path.join(job.outputDir, '%v', 'index.m3u8')
-  );
-
-  return args;
 }
 
 function buildCpuFfmpegArgs(job) {
@@ -768,7 +696,7 @@ function asArray(value) {
 function buildVariantConfig(id, overrides = {}) {
   const base = LADDER[id];
   if (!base) return null;
-  const codec = ['h264', 'hevc', 'h264_vaapi', 'hevc_vaapi', 'h264_videotoolbox', 'hevc_videotoolbox'].includes(overrides.codec)
+  const codec = ['h264', 'hevc', 'h264_videotoolbox', 'hevc_videotoolbox'].includes(overrides.codec)
     ? normalizeCodec(overrides.codec)
     : base.codec;
 
@@ -795,9 +723,6 @@ function normalizeCodec(codec) {
 }
 
 function codecForBackend(codec) {
-  if (ENCODING_BACKEND === 'vaapi') {
-    return normalizeCodec(codec) === 'hevc' ? 'hevc_vaapi' : 'h264_vaapi';
-  }
   if (ENCODING_BACKEND === 'videotoolbox') {
     return normalizeCodec(codec) === 'hevc' ? 'hevc_videotoolbox' : 'h264_videotoolbox';
   }
@@ -807,7 +732,7 @@ function codecForBackend(codec) {
 function codecLabelForBackend(codec) {
   const family = normalizeCodec(codec) === 'hevc' ? 'HEVC' : 'H.264';
   if (ENCODING_BACKEND === 'videotoolbox') return `${family} (via VideoToolbox)`;
-  return ENCODING_BACKEND === 'vaapi' ? `${family} (via VAAPI)` : `${family} (CPU)`;
+  return `${family} (CPU)`;
 }
 
 function normalizeRate(value, fallback) {

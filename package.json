@@ -1,5 +1,5 @@
 {
-  "name": "vaapi-hls-transcoder",
+  "name": "hls-transcoder",
   "version": "1.0.0",
   "description": "Dockerized HLS transcoding web application.",
   "main": "server/index.js",
