@@ -228,7 +228,6 @@ function renderVariant(variant) {
         <span>Codec</span>
         <select name="codec-${variant.id}">
           <option value="h264" ${variant.codec === 'h264' ? 'selected' : ''}>H.264 (${backendLabel()})</option>
-          <option value="hevc" ${variant.codec === 'hevc' ? 'selected' : ''}>HEVC (${backendLabel()})</option>
         </select>
       </label>
     </article>

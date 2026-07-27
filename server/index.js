@@ -7,6 +7,7 @@ const cors = require('cors');
 const express = require('express');
 const multer = require('multer');
 const sanitize = require('sanitize-filename');
+const { validateHlsPackage } = require('./validator');
 
 const PORT = Number(process.env.PORT || 7000);
 const HOST_ROOT = process.env.HOST_ROOT || (process.platform === 'darwin' ? '/' : '/host');
@@ -17,6 +18,9 @@ const REQUESTED_ENCODING_BACKEND = process.env.ENCODING_BACKEND || 'auto';
 const ENCODING_BACKEND = resolveEncodingBackend(REQUESTED_ENCODING_BACKEND);
 const ENCODING_BACKEND_DETAILS = describeEncodingBackend();
 const MAX_UPLOAD_BYTES = parseBytes(process.env.MAX_UPLOAD_SIZE || process.env.MAX_UPLOAD_BYTES || '100GB');
+const HLS_SEGMENT_SECONDS = Number(process.env.HLS_SEGMENT_SECONDS || 4);
+const AUDIO_BITRATE = process.env.AUDIO_BITRATE || '192k';
+const AUDIO_BANDWIDTH = 192000;
 
 const LADDER = {
   '4k': {
@@ -27,8 +31,8 @@ const LADDER = {
     target: '16M',
     maxrate: '24M',
     bufsize: '32M',
-    codec: 'hevc',
-    codecLabel: 'HEVC',
+    codec: 'h264',
+    codecLabel: 'H.264',
     bandwidth: 16000000
   },
   '2k': {
@@ -39,8 +43,8 @@ const LADDER = {
     target: '10M',
     maxrate: '15M',
     bufsize: '20M',
-    codec: 'hevc',
-    codecLabel: 'HEVC',
+    codec: 'h264',
+    codecLabel: 'H.264',
     bandwidth: 10000000
   },
   '1080p': {
@@ -106,7 +110,7 @@ function describeEncodingBackend() {
 
 function hasVideoToolboxEncoders() {
   const encoders = listFfmpegEncoders();
-  return encoders.includes('h264_videotoolbox') && encoders.includes('hevc_videotoolbox');
+  return encoders.includes('h264_videotoolbox');
 }
 
 function listFfmpegEncoders() {
@@ -266,7 +270,10 @@ app.post(
       return res.status(400).json({ error: 'Source video path is not readable.' });
     }
 
-    const variants = selectedIds.map((id) => buildVariantConfig(id, variantSettings[id])).filter(Boolean);
+    const variants = selectedIds
+      .map((id) => buildVariantConfig(id, variantSettings[id]))
+      .filter(Boolean)
+      .sort((a, b) => a.bandwidth - b.bandwidth);
     if (!variants.length) {
       cleanupUploads(videoFile, ...subtitleFiles);
       return res.status(400).json({ error: 'Select at least one bitrate ladder variant.' });
@@ -321,6 +328,7 @@ app.post(
 
       const job = {
         outputDir,
+        duration: estimateHlsPackageDuration(outputDir),
         subtitles: subtitleFiles.map((file, index) => ({
           source: file.path,
           originalName: file.originalname,
@@ -383,6 +391,7 @@ function createJob({ source, uploadedSource, originalName, hostPath, outputFolde
   const id = crypto.randomUUID();
   const containerHostPath = hostPathToContainer(hostPath);
   const outputDir = path.join(containerHostPath, outputFolder);
+  const workDir = path.join(containerHostPath, `.${outputFolder}.tmp-${id}`);
 
   return {
     id,
@@ -392,6 +401,7 @@ function createJob({ source, uploadedSource, originalName, hostPath, outputFolde
     hostPath,
     outputFolder,
     outputDir,
+    workDir,
     variants,
     subtitles,
     clients: new Set(),
@@ -409,17 +419,28 @@ function createJob({ source, uploadedSource, originalName, hostPath, outputFolde
 
 async function runJob(job) {
   updateJob(job, { status: 'probing', message: 'Reading source duration.' });
-  job.duration = await probeDuration(job.source);
-
-  fs.mkdirSync(job.outputDir, { recursive: true });
-  for (const variant of job.variants) {
-    fs.mkdirSync(path.join(job.outputDir, variant.id), { recursive: true });
+  job.sourceMetadata = await probeSourceMetadata(job.source);
+  job.duration = job.sourceMetadata.duration;
+  job.hasAudio = job.sourceMetadata.hasAudio;
+  job.frameRate = job.sourceMetadata.frameRate || 30;
+  job.gopSize = Math.max(1, Math.round(job.frameRate * HLS_SEGMENT_SECONDS));
+  if (!job.hasAudio) {
+    appendLog(job, 'Warning: source input has no audio stream; output will be video-only.');
   }
-  fs.accessSync(job.outputDir, fs.constants.W_OK);
+
+  fs.rmSync(job.workDir, { recursive: true, force: true });
+  fs.mkdirSync(job.workDir, { recursive: true });
+  for (const variant of job.variants) {
+    fs.mkdirSync(path.join(job.workDir, variant.id), { recursive: true });
+  }
+  fs.accessSync(job.workDir, fs.constants.W_OK);
 
   const args = buildFfmpegArgs(job);
   appendLog(job, `ffmpeg ${args.map(shellQuote).join(' ')}`);
-  updateJob(job, { status: 'running', message: `Transcoding with ${ENCODING_BACKEND.toUpperCase()} backend.` });
+  updateJob(job, {
+    status: 'running',
+    message: `Transcoding with ${ENCODING_BACKEND.toUpperCase()} backend${job.hasAudio ? ' and AAC audio' : ''}.`
+  });
 
   await new Promise((resolve, reject) => {
     const child = spawn(FFMPEG_BIN, args, { stdio: ['ignore', 'ignore', 'pipe'] });
@@ -434,6 +455,7 @@ async function runJob(job) {
     child.on('close', (code) => {
       if (code === 0) {
         finalizeJob(job)
+          .then(() => validateAndPublishJob(job))
           .then(() => {
             cleanupJobFiles(job);
             updateJob(job, {
@@ -453,36 +475,107 @@ async function runJob(job) {
 }
 
 async function finalizeJob(job) {
-  if (!job.subtitles?.length) return;
-
-  const subtitleDir = path.join(job.outputDir, 'subtitles');
-  await fs.promises.mkdir(subtitleDir, { recursive: true });
-
   const tracks = [];
-  for (const [index, subtitle] of job.subtitles.entries()) {
-    const baseName = sanitize(path.basename(subtitle.originalName, path.extname(subtitle.originalName))) || `subtitle-${index + 1}`;
-    const subtitleFileName = uniqueSubtitleFileName(baseName, subtitle.language, index);
-    const subtitleRelativePath = path.posix.join('subtitles', subtitleFileName);
-    const subtitleOutputPath = path.join(subtitleDir, subtitleFileName);
+  if (job.subtitles?.length) {
+    const subtitleDir = path.join(job.workDir || job.outputDir, 'subtitles');
+    await fs.promises.mkdir(subtitleDir, { recursive: true });
 
-    await fs.promises.copyFile(subtitle.source, subtitleOutputPath);
-    tracks.push({
-      ...subtitle,
-      uri: subtitleRelativePath,
-      default: index === 0
-    });
+    for (const [index, subtitle] of job.subtitles.entries()) {
+      const baseName = sanitize(path.basename(subtitle.originalName, path.extname(subtitle.originalName))) || `subtitle-${index + 1}`;
+      const trackId = uniqueSubtitleTrackId(subtitle.language, index);
+      const trackDir = path.join(subtitleDir, trackId);
+      const subtitleFileName = `${baseName}.vtt`;
+      const subtitleRelativePath = path.posix.join('subtitles', trackId, 'index.m3u8');
+      const subtitleOutputPath = path.join(trackDir, subtitleFileName);
+
+      await fs.promises.mkdir(trackDir, { recursive: true });
+      await fs.promises.copyFile(subtitle.source, subtitleOutputPath);
+      await writeSubtitlePlaylist({
+        playlistPath: path.join(trackDir, 'index.m3u8'),
+        vttFileName: subtitleFileName,
+        duration: job.duration
+      });
+      tracks.push({
+        ...subtitle,
+        uri: subtitleRelativePath,
+        default: index === 0
+      });
+    }
   }
 
-  await attachSubtitlesToMasterPlaylist(job, tracks);
+  if (job.variants?.length) {
+    await rewriteMasterPlaylist(job, tracks);
+  } else if (tracks.length) {
+    await attachSubtitlesToMasterPlaylist(job, tracks);
+  }
+}
+
+async function validateAndPublishJob(job) {
+  updateJob(job, { status: 'validating', message: 'Validating HLS package before publishing.' });
+  await validateHlsPackage(job.workDir, {
+    ffprobePath: FFPROBE_BIN,
+    expectedAudio: job.hasAudio,
+    expectedVariants: job.variants,
+    expectedSubtitles: job.subtitles || [],
+    duration: job.duration
+  });
+
+  const finalParent = path.dirname(job.outputDir);
+  await fs.promises.mkdir(finalParent, { recursive: true });
+  const backupDir = `${job.outputDir}.previous-${new Date().toISOString().replace(/[:.]/g, '-')}`;
+
+  if (fs.existsSync(job.outputDir)) {
+    await fs.promises.rename(job.outputDir, backupDir);
+  }
+
+  try {
+    await fs.promises.rename(job.workDir, job.outputDir);
+  } catch (error) {
+    if (fs.existsSync(backupDir) && !fs.existsSync(job.outputDir)) {
+      await fs.promises.rename(backupDir, job.outputDir);
+    }
+    throw error;
+  }
+}
+
+async function rewriteMasterPlaylist(job, subtitleTracks) {
+  const lines = ['#EXTM3U', '#EXT-X-VERSION:3', '#EXT-X-INDEPENDENT-SEGMENTS'];
+  const subtitleGroup = subtitleTracks.length ? 'subs' : null;
+
+  for (const track of subtitleTracks) {
+    const defaultValue = track.default ? 'YES' : 'NO';
+    lines.push(
+      `#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="${subtitleGroup}",NAME="${escapePlaylistAttribute(track.name)}",DEFAULT=${defaultValue},AUTOSELECT=YES,FORCED=NO,LANGUAGE="${escapePlaylistAttribute(track.language)}",URI="${escapePlaylistAttribute(track.uri)}"`
+    );
+  }
+
+  for (const variant of job.variants) {
+    const bandwidth = variant.bandwidth + (job.hasAudio ? AUDIO_BANDWIDTH : 0);
+    const codecs = buildCodecsAttribute(variant, job.hasAudio);
+    const attrs = [
+      `BANDWIDTH=${bandwidth}`,
+      `AVERAGE-BANDWIDTH=${bandwidth}`,
+      `RESOLUTION=${variant.width}x${variant.height}`,
+      `FRAME-RATE=${Number(job.frameRate || 30).toFixed(3)}`,
+      `CODECS="${codecs}"`
+    ];
+
+    if (subtitleGroup) attrs.push(`SUBTITLES="${subtitleGroup}"`);
+
+    lines.push(`#EXT-X-STREAM-INF:${attrs.join(',')}`);
+    lines.push(`${variant.id}/index.m3u8`);
+  }
+
+  await fs.promises.writeFile(path.join(job.workDir, 'master.m3u8'), `${lines.join('\n')}\n`, 'utf8');
 }
 
 async function attachSubtitlesToMasterPlaylist(job, tracks) {
-  const masterPath = path.join(job.outputDir, 'master.m3u8');
+  const masterPath = path.join(job.workDir || job.outputDir, 'master.m3u8');
   const playlist = await fs.promises.readFile(masterPath, 'utf8');
   const groupId = 'subs';
   const subtitleLines = tracks.map((track) => {
     const defaultValue = track.default ? 'YES' : 'NO';
-    return `#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="${groupId}",NAME="${escapePlaylistAttribute(track.name)}",DEFAULT=${defaultValue},AUTOSELECT=YES,LANGUAGE="${escapePlaylistAttribute(track.language)}",URI="${escapePlaylistAttribute(track.uri)}"`;
+    return `#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="${groupId}",NAME="${escapePlaylistAttribute(track.name)}",DEFAULT=${defaultValue},AUTOSELECT=YES,FORCED=NO,LANGUAGE="${escapePlaylistAttribute(track.language)}",URI="${escapePlaylistAttribute(track.uri)}"`;
   });
 
   const lines = playlist.split(/\r?\n/);
@@ -531,17 +624,18 @@ function buildCpuFfmpegArgs(job) {
     args.push('-b:v:' + index, variant.target);
     args.push('-maxrate:v:' + index, variant.maxrate);
     args.push('-bufsize:v:' + index, variant.bufsize);
-    args.push('-g:v:' + index, '60');
-    args.push('-keyint_min:v:' + index, '60');
+    args.push('-g:v:' + index, String(job.gopSize));
+    args.push('-keyint_min:v:' + index, String(job.gopSize));
     args.push('-sc_threshold:v:' + index, '0');
   });
 
+  args.push('-force_key_frames', `expr:gte(t,n_forced*${HLS_SEGMENT_SECONDS})`);
+  appendAudioArgs(args, job);
   args.push(
-    '-an',
     '-f',
     'hls',
     '-hls_time',
-    '2',
+    String(HLS_SEGMENT_SECONDS),
     '-hls_playlist_type',
     'vod',
     '-hls_flags',
@@ -549,10 +643,10 @@ function buildCpuFfmpegArgs(job) {
     '-master_pl_name',
     'master.m3u8',
     '-var_stream_map',
-    job.variants.map((_, index) => `v:${index},name:${job.variants[index].id}`).join(' '),
+    buildVariantStreamMap(job),
     '-hls_segment_filename',
-    path.join(job.outputDir, '%v', 'segment_%05d.ts'),
-    path.join(job.outputDir, '%v', 'index.m3u8')
+    path.join(job.workDir, '%v', 'segment_%05d.ts'),
+    path.join(job.workDir, '%v', 'index.m3u8')
   );
 
   return args;
@@ -576,17 +670,18 @@ function buildVideoToolboxFfmpegArgs(job) {
     args.push('-b:v:' + index, variant.target);
     args.push('-maxrate:v:' + index, variant.maxrate);
     args.push('-bufsize:v:' + index, variant.bufsize);
-    args.push('-g:v:' + index, '60');
-    args.push('-keyint_min:v:' + index, '60');
+    args.push('-g:v:' + index, String(job.gopSize));
+    args.push('-keyint_min:v:' + index, String(job.gopSize));
     args.push('-sc_threshold:v:' + index, '0');
   });
 
+  args.push('-force_key_frames', `expr:gte(t,n_forced*${HLS_SEGMENT_SECONDS})`);
+  appendAudioArgs(args, job);
   args.push(
-    '-an',
     '-f',
     'hls',
     '-hls_time',
-    '2',
+    String(HLS_SEGMENT_SECONDS),
     '-hls_playlist_type',
     'vod',
     '-hls_flags',
@@ -594,13 +689,105 @@ function buildVideoToolboxFfmpegArgs(job) {
     '-master_pl_name',
     'master.m3u8',
     '-var_stream_map',
-    job.variants.map((_, index) => `v:${index},name:${job.variants[index].id}`).join(' '),
+    buildVariantStreamMap(job),
     '-hls_segment_filename',
-    path.join(job.outputDir, '%v', 'segment_%05d.ts'),
-    path.join(job.outputDir, '%v', 'index.m3u8')
+    path.join(job.workDir, '%v', 'segment_%05d.ts'),
+    path.join(job.workDir, '%v', 'index.m3u8')
   );
 
   return args;
+}
+
+function appendAudioArgs(args, job) {
+  if (!job.hasAudio) {
+    args.push('-an');
+    return;
+  }
+
+  job.variants.forEach((_variant, index) => {
+    args.push('-map', '0:a:0');
+    args.push('-c:a:' + index, 'aac');
+    args.push('-b:a:' + index, AUDIO_BITRATE);
+    args.push('-ac:a:' + index, '2');
+    args.push('-ar:a:' + index, '48000');
+  });
+}
+
+function buildVariantStreamMap(job) {
+  return job.variants
+    .map((variant, index) => {
+      const audioMap = job.hasAudio ? `,a:${index}` : '';
+      return `v:${index}${audioMap},name:${variant.id}`;
+    })
+    .join(' ');
+}
+
+function estimateHlsPackageDuration(outputDir) {
+  const masterPath = path.join(outputDir, 'master.m3u8');
+  const lines = fs.readFileSync(masterPath, 'utf8').split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  const firstChild = lines.find((line, index) => index > 0 && !line.startsWith('#') && /\.m3u8($|\?)/i.test(line));
+  if (!firstChild) return HLS_SEGMENT_SECONDS;
+
+  const childPath = path.join(outputDir, firstChild);
+  if (!fs.existsSync(childPath)) return HLS_SEGMENT_SECONDS;
+
+  return fs.readFileSync(childPath, 'utf8')
+    .split(/\r?\n/)
+    .filter((line) => line.startsWith('#EXTINF:'))
+    .reduce((sum, line) => sum + Number(line.slice('#EXTINF:'.length).split(',')[0] || 0), 0) || HLS_SEGMENT_SECONDS;
+}
+
+function probeSourceMetadata(source) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(FFPROBE_BIN, [
+      '-v',
+      'error',
+      '-show_entries',
+      'format=duration',
+      '-show_streams',
+      '-of',
+      'json',
+      source
+    ]);
+
+    let output = '';
+    let errorOutput = '';
+    child.stdout.on('data', (chunk) => {
+      output += chunk.toString();
+    });
+    child.stderr.on('data', (chunk) => {
+      errorOutput += chunk.toString();
+    });
+    child.on('error', (error) => reject(processSpawnError(error, FFPROBE_BIN)));
+    child.on('close', (code) => {
+      if (code !== 0) {
+        reject(new Error(errorOutput || 'Unable to inspect source media.'));
+        return;
+      }
+
+      try {
+        const metadata = JSON.parse(output);
+        const video = (metadata.streams || []).find((stream) => stream.codec_type === 'video');
+        const audio = (metadata.streams || []).find((stream) => stream.codec_type === 'audio');
+        const duration = Number.parseFloat(metadata.format?.duration || video?.duration);
+
+        if (!video || !Number.isFinite(duration) || duration <= 0) {
+          reject(new Error('Source media must contain a valid video stream with duration.'));
+          return;
+        }
+
+        resolve({
+          duration,
+          hasAudio: Boolean(audio),
+          frameRate: parseFrameRate(video.avg_frame_rate || video.r_frame_rate) || 30,
+          videoCodec: video.codec_name || null,
+          audioCodec: audio?.codec_name || null
+        });
+      } catch (error) {
+        reject(new Error(`Unable to parse source metadata: ${error.message}`));
+      }
+    });
+  });
 }
 
 function probeDuration(source) {
@@ -631,6 +818,39 @@ function probeDuration(source) {
         return;
       }
       resolve(duration);
+    });
+  });
+}
+
+function probeHasAudio(source) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(FFPROBE_BIN, [
+      '-v',
+      'error',
+      '-select_streams',
+      'a:0',
+      '-show_entries',
+      'stream=codec_type',
+      '-of',
+      'csv=p=0',
+      source
+    ]);
+
+    let output = '';
+    let errorOutput = '';
+    child.stdout.on('data', (chunk) => {
+      output += chunk.toString();
+    });
+    child.stderr.on('data', (chunk) => {
+      errorOutput += chunk.toString();
+    });
+    child.on('error', (error) => reject(processSpawnError(error, FFPROBE_BIN)));
+    child.on('close', (code) => {
+      if (code !== 0) {
+        reject(new Error(errorOutput || 'Unable to inspect source audio.'));
+        return;
+      }
+      resolve(output.trim().split(/\s+/).includes('audio'));
     });
   });
 }
@@ -729,9 +949,7 @@ function asArray(value) {
 function buildVariantConfig(id, overrides = {}) {
   const base = LADDER[id];
   if (!base) return null;
-  const codec = ['h264', 'hevc', 'h264_videotoolbox', 'hevc_videotoolbox'].includes(overrides.codec)
-    ? normalizeCodec(overrides.codec)
-    : base.codec;
+  const codec = ['h264', 'h264_videotoolbox'].includes(overrides.codec) ? 'h264' : base.codec;
 
   return {
     ...base,
@@ -752,20 +970,30 @@ function formatVariantForBackend(variant) {
 }
 
 function normalizeCodec(codec) {
-  return String(codec).includes('hevc') ? 'hevc' : 'h264';
+  return 'h264';
+}
+
+function buildCodecsAttribute(variant, hasAudio) {
+  const videoCodec = h264CodecString(variant);
+  return hasAudio ? `${videoCodec},mp4a.40.2` : videoCodec;
+}
+
+function h264CodecString(variant) {
+  if (variant.height > 1080) return 'avc1.640033';
+  if (variant.height >= 1080) return 'avc1.640028';
+  if (variant.height >= 720) return 'avc1.64001f';
+  return 'avc1.42c01e';
 }
 
 function codecForBackend(codec) {
   if (ENCODING_BACKEND === 'videotoolbox') {
-    return normalizeCodec(codec) === 'hevc' ? 'hevc_videotoolbox' : 'h264_videotoolbox';
+    return 'h264_videotoolbox';
   }
-  return normalizeCodec(codec) === 'hevc' ? 'libx265' : 'libx264';
+  return 'libx264';
 }
 
 function codecLabelForBackend(codec) {
-  const family = normalizeCodec(codec) === 'hevc' ? 'HEVC' : 'H.264';
-  if (ENCODING_BACKEND === 'videotoolbox') return `${family} (via VideoToolbox)`;
-  return `${family} (CPU)`;
+  return ENCODING_BACKEND === 'videotoolbox' ? 'H.264 (via VideoToolbox)' : 'H.264 (CPU)';
 }
 
 function normalizeRate(value, fallback) {
@@ -801,9 +1029,26 @@ function sanitizeText(value, fallback) {
   return text || fallback;
 }
 
-function uniqueSubtitleFileName(baseName, language, index) {
-  const cleanBase = sanitize(`${index + 1}-${language}-${baseName}`) || `subtitle-${index + 1}`;
-  return `${cleanBase}.vtt`;
+function uniqueSubtitleTrackId(language, index) {
+  return sanitize(`${index + 1}-${language}`) || `subtitle-${index + 1}`;
+}
+
+async function writeSubtitlePlaylist({ playlistPath, vttFileName, duration }) {
+  const targetDuration = Math.max(1, Math.ceil(duration || HLS_SEGMENT_SECONDS));
+  const extinf = Number(duration || HLS_SEGMENT_SECONDS).toFixed(3);
+  const playlist = [
+    '#EXTM3U',
+    '#EXT-X-VERSION:3',
+    `#EXT-X-TARGETDURATION:${targetDuration}`,
+    '#EXT-X-MEDIA-SEQUENCE:0',
+    '#EXT-X-PLAYLIST-TYPE:VOD',
+    `#EXTINF:${extinf},`,
+    vttFileName,
+    '#EXT-X-ENDLIST',
+    ''
+  ].join('\n');
+
+  await fs.promises.writeFile(playlistPath, playlist, 'utf8');
 }
 
 function escapePlaylistAttribute(value) {
@@ -819,6 +1064,14 @@ function hostPathToContainer(hostPath) {
 function normalizeHostBrowsePath(value) {
   const normalized = path.posix.normalize(`/${String(value).replace(/\\/g, '/')}`);
   return normalized === '//' ? '/' : normalized;
+}
+
+function parseFrameRate(value) {
+  if (!value || value === '0/0') return null;
+  const [num, den] = String(value).split('/').map(Number);
+  if (Number.isFinite(num) && Number.isFinite(den) && den > 0) return num / den;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
 }
 
 function isPathInsideRoot(targetPath, rootPath) {

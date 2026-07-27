@@ -4,7 +4,9 @@
   "description": "Dockerized HLS transcoding web application.",
   "main": "server/index.js",
   "scripts": {
-    "start": "node server/index.js"
+    "start": "node server/index.js",
+    "validate:hls": "node server/validator.js",
+    "test": "node --test"
   },
   "dependencies": {
     "cors": "^2.8.5",
